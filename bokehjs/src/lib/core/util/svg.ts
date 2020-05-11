@@ -88,9 +88,15 @@ const namedEntities = createNamedToNumberedLookup(
         '80f,rlm,80j,ndash,80k,mdash,80o,lsquo,80p,rsquo,80q,sbquo,80s,ldquo,80t,rdquo,80u,bdquo,810,dagger,' +
         '811,Dagger,81g,permil,81p,lsaquo,81q,rsaquo,85c,euro', 32);
 
+type Style = {
+  svgAttr?: string
+  canvas: unknown
+  svg?: unknown
+  apply?: string
+}
 
 //Some basic mappings for attributes and default values.
-const STYLES: KV<KV<unknown>> = {
+const STYLES: KV<Style> = {
     "strokeStyle":{
         svgAttr : "stroke", //corresponding svg attribute
         canvas : "#000000", //canvas default
@@ -164,10 +170,10 @@ const STYLES: KV<KV<unknown>> = {
 };
 
 class CanvasGradient {
-  __root: any
-  __ctx: any
+  __root: SVGElement
+  __ctx: SVGRenderingContext2D
 
-  constructor(gradientNode, ctx) {
+  constructor(gradientNode: SVGElement, ctx: SVGRenderingContext2D) {
     this.__root = gradientNode;
     this.__ctx = ctx;
   }
@@ -177,7 +183,7 @@ class CanvasGradient {
    */
   addColorStop(offset: number, color: string): void {
     const stop = this.__ctx.__createElement("stop")
-    stop.setAttribute("offset", offset);
+    stop.setAttribute("offset", `${offset}`);
     if (color.indexOf("rgba") !== -1) {
         //separate alpha value, since webkit can't handle it
         const regex = /rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d?\.?\d*)\s*\)/gi;
@@ -193,10 +199,10 @@ class CanvasGradient {
 }
 
 class CanvasPattern {
-  __root: any
-  __ctx: any
+  __root: SVGPatternElement
+  __ctx: SVGRenderingContext2D
 
-  constructor(pattern, ctx) {
+  constructor(pattern: SVGPatternElement, ctx: SVGRenderingContext2D) {
     this.__root = pattern;
     this.__ctx = ctx;
   }
@@ -219,11 +225,9 @@ type Options = {
  * enableMirroring - enables canvas mirroring (get image data) (defaults to false)
  * document - the document object (defaults to the current document)
  */
-export class SVGRenderingContext2D {
+export class SVGRenderingContext2D /*implements CanvasRenderingContext2D*/ {
   width: number
   height: number
-
-  font: string
 
   __canvas: HTMLCanvasElement
   __ctx: CanvasRenderingContext2D
@@ -234,17 +238,35 @@ export class SVGRenderingContext2D {
   __stack: any
   __groupStack: any
   __document: Document
-  __currentElement: SVGElement
+  __currentElement: SVGElement // null?
   __currentDefaultPath: string
   __currentPosition: {x: number, y: number} | null = null
-  __currentElementsToStyle: any
+  __currentElementsToStyle: {element: SVGElement, children: SVGElement[]} | null = null
+  __fontUnderline?: string
+  __fontHref?: string
 
   enableMirroring: boolean
 
-  get canvas(): any {
+  get canvas(): this {
     // XXX: point back to this instance
     return this
   }
+
+  strokeStyle: string | CanvasGradient | CanvasPattern;
+  fillStyle: string | CanvasGradient | CanvasPattern;
+  lineCap: CanvasLineCap
+  lineJoin: CanvasLineJoin
+  miterLimit: number
+  lineWidth: number
+  globalAlpha: number
+  font: string
+  shadowColor: string
+  shadowOffsetX: number
+  shadowOffsetY: number
+  shadowBlur: number
+  textAlign: CanvasTextAlign
+  textBaseline: CanvasTextBaseline
+  lineDash: string | number[] | null
 
   constructor(options?: Options) {
     this.width = options?.width ?? 500
@@ -342,15 +364,15 @@ export class SVGRenderingContext2D {
   /**
    * Apples the current styles to the current SVG element. On "ctx.fill" or "ctx.stroke"
    */
-  __applyStyleToCurrentElement(type) {
+  __applyStyleToCurrentElement(type: string): void {
     let currentElement = this.__currentElement;
     const currentStyleGroup = this.__currentElementsToStyle;
-    if (currentStyleGroup) {
+    if (currentStyleGroup != null) {
       currentElement.setAttribute(type, "");
       currentElement = currentStyleGroup.element;
-      currentStyleGroup.children.forEach(function (node) {
+      for (const node of currentStyleGroup.children) {
         node.setAttribute(type, "");
-      })
+      }
     }
 
     const keys = Object.keys(STYLES)
@@ -380,16 +402,16 @@ export class SVGRenderingContext2D {
                 if ((style.svgAttr === "stroke" || style.svgAttr === "fill") && value.indexOf("rgba") !== -1) {
                     //separate alpha value, since illustrator can't handle it
                     const regex = /rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d?\.?\d*)\s*\)/gi;
-                    const matches = regex.exec(value);
+                    const matches = regex.exec(value)!;
                     const [, r, g, b, a] = matches
                     currentElement.setAttribute(style.svgAttr, `rgb(${r},${g},${b})`);
                     //should take globalAlpha here
-                    let opacity = a
+                    let opacity = parseFloat(a)
                     const globalAlpha = this.globalAlpha;
                     if (globalAlpha != null) {
                         opacity *= globalAlpha;
                     }
-                    currentElement.setAttribute(style.svgAttr+"-opacity", opacity);
+                    currentElement.setAttribute(style.svgAttr+"-opacity", `${opacity}`);
                 } else {
                     let attr = style.svgAttr;
                     if (keys[i] === 'globalAlpha') {
@@ -484,7 +506,9 @@ export class SVGRenderingContext2D {
     const parent = this.__closestGroupOrSvg();
     if (parent.childNodes.length > 0) {
       if (this.__currentElement.nodeName === "path") {
-        if (!this.__currentElementsToStyle) this.__currentElementsToStyle = {element: parent, children: []};
+        if (!this.__currentElementsToStyle) {
+          this.__currentElementsToStyle = {element: parent, children: []};
+        }
         this.__currentElementsToStyle.children.push(this.__currentElement)
         this.__applyCurrentDefaultPath();
       }
@@ -685,12 +709,12 @@ export class SVGRenderingContext2D {
 
     // Calculate start angle and end angle
     // rotate 90deg clockwise (note that y axis points to its down)
-    const unit_vec_origin_start_tangent = [
+    const unit_vec_origin_start_tangent: [number, number] = [
         -unit_vec_p1_p0[1],
         unit_vec_p1_p0[0]
     ];
     // rotate 90deg counter clockwise (note that y axis points to its down)
-    const unit_vec_origin_end_tangent = [
+    const unit_vec_origin_end_tangent: [number, number] = [
         unit_vec_p1_p2[1],
         -unit_vec_p1_p2[0]
     ];
@@ -821,7 +845,7 @@ export class SVGRenderingContext2D {
     * Adds a linear gradient to a defs tag.
     * Returns a canvas gradient object that has a reference to it's parent def
     */
-  createLinearGradient(x1: number, y1: number, x2: number, y2: number): CanvasGradientj {
+  createLinearGradient(x1: number, y1: number, x2: number, y2: number): CanvasGradient {
     const grad = this.__createElement("linearGradient", {
         id : randomString(this.__ids),
         x1 : x1+"px",
@@ -838,7 +862,7 @@ export class SVGRenderingContext2D {
     * Adds a radial gradient to a defs tag.
     * Returns a canvas gradient object that has a reference to it's parent def
     */
-  createRadialGradient(x0: number, y0: number, r0: number, x1: number, y1: number, r1: number): CanvasGradient {
+  createRadialGradient(x0: number, y0: number, _r0: number, x1: number, y1: number, r1: number): CanvasGradient {
     const grad = this.__createElement("radialGradient", {
         id : randomString(this.__ids),
         cx : x1+"px",
@@ -858,14 +882,13 @@ export class SVGRenderingContext2D {
     */
   __parseFont(): FontData {
     const regex = /^\s*(?=(?:(?:[-a-z]+\s*){0,2}(italic|oblique))?)(?=(?:(?:[-a-z]+\s*){0,2}(small-caps))?)(?=(?:(?:[-a-z]+\s*){0,2}(bold(?:er)?|lighter|[1-9]00))?)(?:(?:normal|\1|\2|\3)\s*){0,3}((?:xx?-)?(?:small|large)|medium|smaller|larger|[.\d]+(?:\%|in|[cem]m|ex|p[ctx]))(?:\s*\/\s*(normal|[.\d]+(?:\%|in|[cem]m|ex|p[ctx])))?\s*([-,\'\"\sa-z0-9]+?)\s*$/i;
-    const fontPart = regex.exec(this.font);
-    const data = {
+    const fontPart = regex.exec(this.font)!
+    const data: FontData = {
         style : fontPart[1] || 'normal',
         size : fontPart[4] || '10px',
         family : fontPart[6] || 'sans-serif',
         weight: fontPart[3] || 'normal',
         decoration : fontPart[2] || 'normal',
-        href : null
     };
 
     //canvas doesn't support underline natively, but we can pass this attribute
@@ -874,7 +897,7 @@ export class SVGRenderingContext2D {
     }
 
     //canvas also doesn't support linking, but we can pass this as well
-    if (this.__fontHref) {
+    if (this.__fontHref != null) {
         data.href = this.__fontHref;
     }
 
@@ -884,7 +907,7 @@ export class SVGRenderingContext2D {
   /**
     * Helper to link text fragments
     */
-  __wrapTextLink(font, element) {
+  __wrapTextLink(font: FontData, element: SVGElement): Element {
     if (font.href) {
         const a = this.__createElement("a");
         a.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", font.href);
@@ -897,7 +920,7 @@ export class SVGRenderingContext2D {
   /**
     * Fills or strokes text
     */
-  __applyText(text: string, x: number, y: number, action) {
+  __applyText(text: string, x: number, y: number, action: string): void {
     const font = this.__parseFont()
     const parent = this.__closestGroupOrSvg()
     const textElement = this.__createElement("text", {
@@ -1012,17 +1035,24 @@ export class SVGRenderingContext2D {
     * http://www.whatwg.org/specs/web-apps/current-work/multipage/the-canvas-element.html#dom-context-2d-drawimage
     */
   drawImage(image: CanvasImageSource, ...args: number[]): void {
-    let dx, dy, dw, dh, sx=0, sy=0, sw, sh
+    let dx: number, dy: number
+    let dw: number, dh: number
+    let sx: number, sy: number
+    let sw: number, sh: number
     if (args.length == 2) {
         [dx, dy] = args
-        sw = image.width;
-        sh = image.height;
+        sx = 0
+        sy = 0
+        sw = image.width as any;
+        sh = image.height as any;
         dw = sw;
         dh = sh;
     } else if (args.length == 4) {
         [dx, dy, dw, dh] = args
-        sw = image.width;
-        sh = image.height;
+        sx = 0
+        sy = 0
+        sw = image.width as any;
+        sh = image.height as any;
     } else if (args.length === 8) {
         [sx, sy, sw, sh, dx, dy, dw, dh] = args
     } else {
@@ -1033,7 +1063,7 @@ export class SVGRenderingContext2D {
 
     const parent = this.__closestGroupOrSvg();
     const translateDirective = "translate(" + dx + ", " + dy + ")";
-    if (image instanceof ctx) {
+    if (image instanceof SVGRenderingContext2D) {
         //canvas2svg mock canvas context. In the future we may want to clone nodes instead.
         //also I'm currently ignoring dw, dh, sw, sh, sx, sy for a mock context.
         const svg = image.getSvg().cloneNode(true);
@@ -1060,8 +1090,8 @@ export class SVGRenderingContext2D {
         }
     } else if (image.nodeName === "IMG") {
         const svgImage = this.__createElement("image");
-        svgImage.setAttribute("width", dw);
-        svgImage.setAttribute("height", dh);
+        svgImage.setAttribute("width", `${dw}`);
+        svgImage.setAttribute("height", `${dh}`);
         svgImage.setAttribute("preserveAspectRatio", "none");
 
         if (sx || sy || sw !== image.width || sh !== image.height) {
@@ -1079,19 +1109,19 @@ export class SVGRenderingContext2D {
         parent.appendChild(svgImage);
     } else if (image.nodeName === "CANVAS") {
         const svgImage = this.__createElement("image");
-        svgImage.setAttribute("width", dw);
-        svgImage.setAttribute("height", dh);
+        svgImage.setAttribute("width", `${dw}`);
+        svgImage.setAttribute("height", `${dh}`);
         svgImage.setAttribute("preserveAspectRatio", "none");
 
         // draw canvas onto temporary canvas so that smoothing can be handled
         const canvas = this.__document.createElement("canvas");
         canvas.width = dw;
         canvas.height = dh;
-        const context = canvas.getContext("2d");
+        const context = canvas.getContext("2d")!;
         context.imageSmoothingEnabled = false;
-        context.mozImageSmoothingEnabled = false;
-        context.oImageSmoothingEnabled = false;
-        context.webkitImageSmoothingEnabled = false;
+        //context.mozImageSmoothingEnabled = false;
+        //context.oImageSmoothingEnabled = false;
+        //context.webkitImageSmoothingEnabled = false;
         context.drawImage(image, sx, sy, sw, sh, 0, 0, dw, dh);
         image = canvas;
 
@@ -1108,18 +1138,18 @@ export class SVGRenderingContext2D {
     const pattern = this.__document.createElementNS("http://www.w3.org/2000/svg", "pattern")
     const id = randomString(this.__ids)
     pattern.setAttribute("id", id);
-    pattern.setAttribute("width", image.width);
-    pattern.setAttribute("height", image.height);
+    pattern.setAttribute("width", `${image.width}`);
+    pattern.setAttribute("height", `${image.height}`);
     let img
     if (image.nodeName === "CANVAS" || image.nodeName === "IMG") {
         img = this.__document.createElementNS("http://www.w3.org/2000/svg", "image");
-        img.setAttribute("width", image.width);
-        img.setAttribute("height", image.height);
+        img.setAttribute("width", `${image.width}`);
+        img.setAttribute("height", `${image.height}`);
         img.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href",
             image.nodeName === "CANVAS" ? image.toDataURL() : image.getAttribute("src"));
         pattern.appendChild(img);
         this.__defs.appendChild(pattern);
-    } else if (image instanceof ctx) {
+    } else if (image instanceof SVGRenderingContext2D) {
         pattern.appendChild(image.__root.childNodes[1]);
         this.__defs.appendChild(pattern);
     }
